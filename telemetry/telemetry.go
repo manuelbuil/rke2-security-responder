@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	semver "github.com/Masterminds/semver/v3"
 	"github.com/sirupsen/logrus"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -277,9 +278,20 @@ func Send(ctx context.Context, data *Data, endpoint string) (*Response, error) {
 
 		logrus.WithFields(logrus.Fields{"versions": len(response.Versions), "intervalMinutes": response.RequestIntervalInMinutes}).Info("response received")
 		for _, v := range response.Versions {
-			logrus.WithFields(logrus.Fields{"name": v.Name, "releaseDate": v.ReleaseDate, "tags": v.Tags}).Info("available version")
-			if len(v.ExtraInfo) > 0 {
-				logrus.WithField("extraInfo", v.ExtraInfo).Info("version extra info")
+			fields := logrus.Fields{"version": v.Name, "releaseDate": v.ReleaseDate}
+			if url := v.ExtraInfo["releaseNotesURL"]; url != "" {
+				fields["releaseNotesURL"] = url
+			}
+			logrus.WithFields(fields).Info("available version")
+
+			cves := parseCVEs(v.ExtraInfo["cves"])
+			if len(cves) > 0 && isNewerVersion(v.Name, data.AppVersion) {
+				logrus.WithFields(logrus.Fields{
+					"version":         v.Name,
+					"cveCount":        len(cves),
+					"cves":            strings.Join(cves, ", "),
+					"releaseNotesURL": v.ExtraInfo["releaseNotesURL"],
+				}).Warn("newer version fixes security vulnerabilities")
 			}
 		}
 
@@ -307,6 +319,31 @@ func getSELinuxStatus(node *corev1.Node) string {
 		return "disabled"
 	}
 	return "unknown"
+}
+
+func parseCVEs(raw string) []string {
+	if raw == "" {
+		return nil
+	}
+	var cves []string
+	for _, s := range strings.Split(raw, ",") {
+		if cve := strings.TrimSpace(s); cve != "" {
+			cves = append(cves, cve)
+		}
+	}
+	return cves
+}
+
+func isNewerVersion(candidate, current string) bool {
+	c, err := semver.NewVersion(candidate)
+	if err != nil {
+		return false
+	}
+	cur, err := semver.NewVersion(current)
+	if err != nil {
+		return true // unparseable current → show all
+	}
+	return c.GreaterThan(cur)
 }
 
 func extractImageVersion(image string) string {

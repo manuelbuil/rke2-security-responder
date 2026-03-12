@@ -16,6 +16,62 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 )
 
+func TestParseCVEs(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected []string
+	}{
+		{"", nil},
+		{"CVE-2024-1234", []string{"CVE-2024-1234"}},
+		{"CVE-2024-1234,CVE-2024-5678", []string{"CVE-2024-1234", "CVE-2024-5678"}},
+		{" CVE-2024-1234 , CVE-2024-5678 ", []string{"CVE-2024-1234", "CVE-2024-5678"}},
+		{"CVE-2024-1234,,CVE-2024-5678", []string{"CVE-2024-1234", "CVE-2024-5678"}},
+		{"CVE-2024-1234,", []string{"CVE-2024-1234"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			result := parseCVEs(tt.input)
+			if len(result) != len(tt.expected) {
+				t.Fatalf("parseCVEs(%q) = %v, want %v", tt.input, result, tt.expected)
+			}
+			for i := range result {
+				if result[i] != tt.expected[i] {
+					t.Errorf("parseCVEs(%q)[%d] = %q, want %q", tt.input, i, result[i], tt.expected[i])
+				}
+			}
+		})
+	}
+}
+
+func TestIsNewerVersion(t *testing.T) {
+	tests := []struct {
+		name      string
+		candidate string
+		current   string
+		expected  bool
+	}{
+		{"newer patch", "v1.32.5", "v1.32.4", true},
+		{"older patch", "v1.32.4", "v1.32.5", false},
+		{"equal", "v1.32.5", "v1.32.5", false},
+		{"build metadata ignored", "v1.32.5+rke2r1", "v1.32.4+rke2r1", true},
+		{"cross-minor", "v1.33.0", "v1.32.5+rke2r1", true},
+		{"unparseable current", "v1.32.5", "dev", true},
+		{"unparseable candidate", "invalid", "v1.32.4", false},
+		{"pre-release newer than older stable", "v1.32.5-rc1", "v1.32.4", true},
+		{"pre-release older than same stable", "v1.32.5-rc1", "v1.32.5", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := isNewerVersion(tt.candidate, tt.current)
+			if result != tt.expected {
+				t.Errorf("isNewerVersion(%q, %q) = %v, want %v", tt.candidate, tt.current, result, tt.expected)
+			}
+		})
+	}
+}
+
 func TestExtractImageVersion(t *testing.T) {
 	tests := []struct {
 		image    string
@@ -501,6 +557,54 @@ func TestSend_MalformedResponse(t *testing.T) {
 	}
 	if resp != nil {
 		t.Errorf("Send() response = %v, want nil", resp)
+	}
+}
+
+func TestSend_WithCVEExtraInfo(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		resp := Response{
+			Versions: []Version{
+				{
+					Name:        "v1.32.5",
+					ReleaseDate: "2025-04-01",
+					ExtraInfo: map[string]string{
+						"cves":            "CVE-2025-1234,CVE-2025-5678",
+						"releaseNotesURL": "https://github.com/rancher/rke2/releases/tag/v1.32.5%2Brke2r1",
+					},
+				},
+				{
+					Name:        "v1.32.4",
+					ReleaseDate: "2025-03-01",
+					ExtraInfo: map[string]string{
+						"releaseNotesURL": "https://github.com/rancher/rke2/releases/tag/v1.32.4%2Brke2r1",
+					},
+				},
+			},
+			RequestIntervalInMinutes: 480,
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	data := &Data{
+		AppVersion:     "v1.32.3+rke2r1",
+		ExtraTagInfo:   map[string]string{"clusteruuid": "test"},
+		ExtraFieldInfo: map[string]interface{}{"serverNodeCount": 1},
+	}
+
+	resp, err := Send(context.Background(), data, server.URL)
+	if err != nil {
+		t.Fatalf("Send() error = %v", err)
+	}
+	if resp == nil {
+		t.Fatal("Send() returned nil response")
+	}
+	if len(resp.Versions) != 2 {
+		t.Errorf("expected 2 versions, got %d", len(resp.Versions))
+	}
+	if resp.Versions[0].ExtraInfo["cves"] != "CVE-2025-1234,CVE-2025-5678" {
+		t.Errorf("ExtraInfo[cves] = %q, want CVE-2025-1234,CVE-2025-5678", resp.Versions[0].ExtraInfo["cves"])
 	}
 }
 
