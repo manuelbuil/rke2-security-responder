@@ -252,7 +252,7 @@ jobs:
           --namespace kube-system \
           --set image.repository=rke2-security-responder \
           --set image.tag=e2e \
-          --set check.endpoint="https://security-responder.rke2.io/v1/checkupgrade" \
+          --set check.endpoint="https://security-responder.version.rke2.io/v1/checkupgrade" \
           --set extraEnv[0].name=SECURITY_RESPONDER_DEV \
           --set extraEnv[0].value="true" \
           --wait

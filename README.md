@@ -128,7 +128,7 @@ The component is packaged as a Helm chart with the following configurable values
 
 - `mode`: Collection mode - `"recommended"` (default) or `"minimal"`
 - `schedule`: CronJob schedule (default: `"0 */8 * * *"`)
-- `check.endpoint`: Security check endpoint URL (default: `"https://security-responder.rke2.io/v1/check"`)
+- `check.endpoint`: Security check endpoint URL (default: `"https://security-responder.version.rke2.io/v1/check"`)
 - `image.repository`: Container image repository (default: `"rancher/rke2-security-responder"`)
 - `image.tag`: Container image tag (default: `"v0.1.0"`)
 - `resources`: Resource limits and requests
