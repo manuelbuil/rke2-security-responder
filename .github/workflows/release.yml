@@ -24,9 +24,9 @@ jobs:
           secrets: |
             secret/data/github/repo/${{ github.repository }}/dockerhub/rancher/credentials username | DOCKER_USERNAME ;
             secret/data/github/repo/${{ github.repository }}/dockerhub/rancher/credentials password | DOCKER_PASSWORD ;
-            secret/data/github/repo/${{ github.repository }}/prime-registry/credentials registry | PRIME_REGISTRY ;
-            secret/data/github/repo/${{ github.repository }}/prime-registry/credentials username | PRIME_USERNAME ;
-            secret/data/github/repo/${{ github.repository }}/prime-registry/credentials password | PRIME_PASSWORD
+            secret/data/github/repo/${{ github.repository }}/rancher-prime-registry/credentials registry | PRIME_REGISTRY ;
+            secret/data/github/repo/${{ github.repository }}/rancher-prime-registry/credentials username | PRIME_USERNAME ;
+            secret/data/github/repo/${{ github.repository }}/rancher-prime-registry/credentials password | PRIME_PASSWORD
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@ce360397dd3f832beb865e1373c09c0e9f86d70a # v4
