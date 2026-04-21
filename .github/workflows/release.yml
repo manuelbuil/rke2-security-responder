@@ -18,6 +18,11 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
+      - name: Verify chart version matches git tag
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: ./scripts/check-chart-version.sh
+
       - name: Read secrets from Vault
         uses: rancher-eio/read-vault-secrets@0da85151ad1f19ed7986c41587e45aac1ace74b6 # v3
         with:

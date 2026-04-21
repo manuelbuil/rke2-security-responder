@@ -66,7 +66,10 @@ jobs:
     
     - name: Lint Helm Chart
       run: helm lint charts/rke2-security-responder
-    
+
+    - name: Check chart version consistency
+      run: ./scripts/check-chart-version.sh
+
     - name: Template Helm Chart
       run: helm template test-release charts/rke2-security-responder --namespace kube-system
 
