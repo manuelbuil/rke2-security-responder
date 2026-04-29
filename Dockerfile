@@ -1,5 +1,5 @@
 # Build stage - using hardened build base similar to RKE2
-FROM rancher/hardened-build-base:v1.25.5b1 AS builder
+FROM rancher/hardened-build-base:v1.26.2b1 AS builder
 
 ARG BUILDARCH
 ARG TAG=dev
