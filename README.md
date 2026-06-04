@@ -40,6 +40,7 @@ Based on [ADR 010-security-responder](https://github.com/rancher/rke2/blob/maste
 - Sends data to a configurable endpoint
 - Fails gracefully in disconnected environments
 - Minimal resource overhead
+- Logs only versions strictly newer than the running `appVersion`; the `+rke2rN` rebuild suffix is compared numerically so security-relevant re-rolls of the same Kubernetes patch are surfaced.
 
 ## Configuration
 

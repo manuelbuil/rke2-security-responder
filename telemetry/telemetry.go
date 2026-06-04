@@ -296,24 +296,13 @@ func Send(ctx context.Context, data *Data, endpoint string) (*Response, error) {
 			return nil, nil
 		}
 
-		logrus.WithFields(logrus.Fields{"versions": len(response.Versions), "intervalMinutes": response.RequestIntervalInMinutes}).Info("response received")
-		for _, v := range response.Versions {
-			fields := logrus.Fields{"version": v.Name, "releaseDate": v.ReleaseDate}
-			if url := v.ExtraInfo["releaseNotesURL"]; url != "" {
-				fields["releaseNotesURL"] = url
-			}
-			logrus.WithFields(fields).Info("available version")
-
-			cves := parseCVEs(v.ExtraInfo["cves"])
-			if len(cves) > 0 && isNewerVersion(v.Name, data.AppVersion) {
-				logrus.WithFields(logrus.Fields{
-					"version":         v.Name,
-					"cveCount":        len(cves),
-					"cves":            strings.Join(cves, ", "),
-					"releaseNotesURL": v.ExtraInfo["releaseNotesURL"],
-				}).Warn("newer version fixes security vulnerabilities")
-			}
-		}
+		newer := filterNewerVersions(response.Versions, data.AppVersion)
+		logrus.WithFields(logrus.Fields{
+			"versions":        len(response.Versions),
+			"newer":           len(newer),
+			"intervalMinutes": response.RequestIntervalInMinutes,
+		}).Info("response received")
+		logRecommendations(newer)
 
 		logrus.WithField("attempt", attempt).Info("data sent")
 		return &response, nil
@@ -354,6 +343,8 @@ func parseCVEs(raw string) []string {
 	return cves
 }
 
+// isNewerVersion tiebreaks equal semver cores on the RKE2 +rke2rN build
+// metadata so security-relevant rebuilds (e.g. +rke2r1 -> +rke2r2) surface.
 func isNewerVersion(candidate, current string) bool {
 	c, err := semver.NewVersion(candidate)
 	if err != nil {
@@ -363,7 +354,55 @@ func isNewerVersion(candidate, current string) bool {
 	if err != nil {
 		return true // unparseable current → show all
 	}
-	return c.GreaterThan(cur)
+	if c.GreaterThan(cur) {
+		return true
+	}
+	if cur.GreaterThan(c) {
+		return false
+	}
+	return rke2BuildNumber(c.Metadata()) > rke2BuildNumber(cur.Metadata())
+}
+
+func rke2BuildNumber(metadata string) int {
+	suffix, ok := strings.CutPrefix(metadata, "rke2r")
+	if !ok {
+		return 0
+	}
+	n, err := strconv.Atoi(suffix)
+	if err != nil {
+		return 0
+	}
+	return n
+}
+
+func filterNewerVersions(versions []Version, current string) []Version {
+	out := make([]Version, 0, len(versions))
+	for _, v := range versions {
+		if isNewerVersion(v.Name, current) {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+func logRecommendations(newer []Version) {
+	for _, v := range newer {
+		fields := logrus.Fields{"version": v.Name, "releaseDate": v.ReleaseDate}
+		if url := v.ExtraInfo["releaseNotesURL"]; url != "" {
+			fields["releaseNotesURL"] = url
+		}
+		logrus.WithFields(fields).Info("available version")
+
+		cves := parseCVEs(v.ExtraInfo["cves"])
+		if len(cves) > 0 {
+			logrus.WithFields(logrus.Fields{
+				"version":         v.Name,
+				"cveCount":        len(cves),
+				"cves":            strings.Join(cves, ", "),
+				"releaseNotesURL": v.ExtraInfo["releaseNotesURL"],
+			}).Warn("newer version fixes security vulnerabilities")
+		}
+	}
 }
 
 func extractImageVersion(image string) string {

@@ -5,9 +5,12 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"sync/atomic"
 	"testing"
 
+	"github.com/sirupsen/logrus"
+	logtest "github.com/sirupsen/logrus/hooks/test"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -59,12 +62,18 @@ func TestIsNewerVersion(t *testing.T) {
 		{"newer patch", "v1.32.5", "v1.32.4", true},
 		{"older patch", "v1.32.4", "v1.32.5", false},
 		{"equal", "v1.32.5", "v1.32.5", false},
-		{"build metadata ignored", "v1.32.5+rke2r1", "v1.32.4+rke2r1", true},
+		{"different patch wins over build metadata", "v1.32.5+rke2r1", "v1.32.4+rke2r1", true},
 		{"cross-minor", "v1.33.0", "v1.32.5+rke2r1", true},
 		{"unparseable current", "v1.32.5", "dev", true},
 		{"unparseable candidate", "invalid", "v1.32.4", false},
 		{"pre-release newer than older stable", "v1.32.5-rc1", "v1.32.4", true},
 		{"pre-release older than same stable", "v1.32.5-rc1", "v1.32.5", false},
+		{"rke2r rebuild newer", "v1.36.1+rke2r2", "v1.36.1+rke2r1", true},
+		{"rke2r rebuild older", "v1.36.1+rke2r1", "v1.36.1+rke2r2", false},
+		{"rke2r rebuild equal", "v1.36.1+rke2r1", "v1.36.1+rke2r1", false},
+		{"rke2r rebuild numeric not lex", "v1.36.1+rke2r10", "v1.36.1+rke2r2", true},
+		{"missing rebuild treated as 0", "v1.36.1", "v1.36.1+rke2r1", false},
+		{"semver core dominates rebuild", "v1.36.2+rke2r1", "v1.36.1+rke2r9", true},
 	}
 
 	for _, tt := range tests {
@@ -1070,5 +1079,186 @@ func TestCollect_PrimeMinimalMode(t *testing.T) {
 	}
 	if data.ExtraFieldInfo["system-default-registry"] != "registry.rancher.com" {
 		t.Errorf("system-default-registry (minimal) = %v, want %q", data.ExtraFieldInfo["system-default-registry"], "registry.rancher.com")
+	}
+}
+
+func TestRke2BuildNumber(t *testing.T) {
+	cases := []struct {
+		in   string
+		want int
+	}{
+		{"", 0},
+		{"rke2r1", 1},
+		{"rke2r12", 12},
+		{"rke2r", 0},
+		{"rke2rX", 0},
+		{"r1", 0},
+		{"rke2r1.dirty", 0},
+	}
+	for _, c := range cases {
+		t.Run(c.in, func(t *testing.T) {
+			if got := rke2BuildNumber(c.in); got != c.want {
+				t.Errorf("rke2BuildNumber(%q) = %d, want %d", c.in, got, c.want)
+			}
+		})
+	}
+}
+
+func TestFilterNewerVersions(t *testing.T) {
+	versions := []Version{
+		{Name: "v1.32.4"},
+		{Name: "v1.32.5"},
+		{Name: "v1.33.0+rke2r1"},
+		{Name: "v1.32.5+rke2r2"},
+	}
+	got := filterNewerVersions(versions, "v1.32.5+rke2r1")
+	names := make([]string, 0, len(got))
+	for _, v := range got {
+		names = append(names, v.Name)
+	}
+	want := []string{"v1.33.0+rke2r1", "v1.32.5+rke2r2"}
+	if !slices.Equal(names, want) {
+		t.Errorf("filterNewerVersions names = %v, want %v", names, want)
+	}
+}
+
+func captureLogs(t *testing.T) *logtest.Hook {
+	t.Helper()
+	prevLevel := logrus.GetLevel()
+	logrus.SetLevel(logrus.DebugLevel)
+	hook := logtest.NewGlobal()
+	t.Cleanup(func() {
+		hook.Reset()
+		logrus.StandardLogger().ReplaceHooks(make(logrus.LevelHooks))
+		logrus.SetLevel(prevLevel)
+	})
+	return hook
+}
+
+func entriesWithMsg(hook *logtest.Hook, msg string) []*logrus.Entry {
+	var out []*logrus.Entry
+	for _, e := range hook.AllEntries() {
+		if e.Message == msg {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+func newSendStub(t *testing.T, resp Response) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+}
+
+func TestSend_OnlyOlderVersions_Silent(t *testing.T) {
+	hook := captureLogs(t)
+	server := newSendStub(t, Response{
+		Versions: []Version{
+			{Name: "v1.32.4", ReleaseDate: "2025-03-01"},
+			{Name: "v1.33.0", ReleaseDate: "2025-02-01"},
+		},
+		RequestIntervalInMinutes: 480,
+	})
+	defer server.Close()
+
+	data := &Data{AppVersion: "v1.34.0", ExtraTagInfo: map[string]string{}, ExtraFieldInfo: map[string]interface{}{}}
+	if _, err := Send(context.Background(), data, server.URL); err != nil {
+		t.Fatalf("Send() error = %v", err)
+	}
+	if n := len(entriesWithMsg(hook, "available version")); n != 0 {
+		t.Errorf("available version logged %d times, want 0", n)
+	}
+	rr := entriesWithMsg(hook, "response received")
+	if len(rr) == 0 {
+		t.Fatal("response received not logged")
+	}
+	if rr[0].Data["newer"] != 0 {
+		t.Errorf("newer = %v, want 0", rr[0].Data["newer"])
+	}
+	if rr[0].Data["versions"] != 2 {
+		t.Errorf("versions = %v, want 2", rr[0].Data["versions"])
+	}
+	if rr[0].Data["intervalMinutes"] != 480 {
+		t.Errorf("intervalMinutes = %v, want 480", rr[0].Data["intervalMinutes"])
+	}
+	if len(entriesWithMsg(hook, "data sent")) == 0 {
+		t.Error("data sent not logged")
+	}
+	if len(entriesWithMsg(hook, "newer version fixes security vulnerabilities")) > 0 {
+		t.Error("CVE warn must not fire when no newer version present")
+	}
+}
+
+func TestSend_MixedVersions_OnlyNewerLogged(t *testing.T) {
+	hook := captureLogs(t)
+	server := newSendStub(t, Response{
+		Versions: []Version{
+			{Name: "v1.36.0+rke2r1", ReleaseDate: "2025-01-01"},
+			{Name: "v1.36.1+rke2r2", ReleaseDate: "2025-02-01", ExtraInfo: map[string]string{"cves": "CVE-2026-9"}},
+			{Name: "v1.37.0+rke2r1", ReleaseDate: "2025-03-01"},
+			{Name: "v1.35.0+rke2r1", ReleaseDate: "2024-10-01"},
+		},
+		RequestIntervalInMinutes: 480,
+	})
+	defer server.Close()
+
+	data := &Data{AppVersion: "v1.36.1+rke2r1", ExtraTagInfo: map[string]string{}, ExtraFieldInfo: map[string]interface{}{}}
+	if _, err := Send(context.Background(), data, server.URL); err != nil {
+		t.Fatalf("Send() error = %v", err)
+	}
+
+	avail := entriesWithMsg(hook, "available version")
+	names := make([]string, 0, len(avail))
+	for _, e := range avail {
+		names = append(names, e.Data["version"].(string))
+	}
+	wantNames := map[string]bool{"v1.36.1+rke2r2": true, "v1.37.0+rke2r1": true}
+	if len(names) != len(wantNames) {
+		t.Fatalf("available versions = %v, want keys %v", names, wantNames)
+	}
+	for _, v := range names {
+		if !wantNames[v] {
+			t.Errorf("unexpected available version %q", v)
+		}
+	}
+
+	rr := entriesWithMsg(hook, "response received")
+	if len(rr) == 0 || rr[0].Data["newer"] != 2 || rr[0].Data["versions"] != 4 {
+		t.Errorf("response received = %+v, want versions=4 newer=2", rr)
+	}
+
+	warn := entriesWithMsg(hook, "newer version fixes security vulnerabilities")
+	if len(warn) == 0 {
+		t.Fatal("CVE warn expected for newer rke2r2 rebuild")
+	}
+	if warn[0].Data["version"] != "v1.36.1+rke2r2" {
+		t.Errorf("CVE warn version = %v, want v1.36.1+rke2r2", warn[0].Data["version"])
+	}
+}
+
+func TestSend_UnparseableAppVersion_ShowsAll(t *testing.T) {
+	hook := captureLogs(t)
+	server := newSendStub(t, Response{
+		Versions: []Version{
+			{Name: "v1.32.4"},
+			{Name: "v1.33.0"},
+		},
+		RequestIntervalInMinutes: 480,
+	})
+	defer server.Close()
+
+	data := &Data{AppVersion: "dev", ExtraTagInfo: map[string]string{}, ExtraFieldInfo: map[string]interface{}{}}
+	if _, err := Send(context.Background(), data, server.URL); err != nil {
+		t.Fatalf("Send() error = %v", err)
+	}
+	if n := len(entriesWithMsg(hook, "available version")); n != 2 {
+		t.Errorf("available version count = %d, want 2", n)
+	}
+	rr := entriesWithMsg(hook, "response received")
+	if len(rr) == 0 || rr[0].Data["newer"] != 2 {
+		t.Errorf("response received newer = %+v, want 2", rr)
 	}
 }
