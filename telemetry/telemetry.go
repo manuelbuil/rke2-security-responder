@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -15,7 +16,12 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 )
 
@@ -25,6 +31,12 @@ const (
 	maxRetries      = 3
 	retryDelay      = 2 * time.Second
 )
+
+var helmChartGVR = schema.GroupVersionResource{
+	Group:    "helm.cattle.io",
+	Version:  "v1",
+	Resource: "helmcharts",
+}
 
 type Data struct {
 	AppVersion     string                 `json:"appVersion"`
@@ -45,7 +57,7 @@ type Version struct {
 	ExtraInfo            map[string]string `json:"extraInfo,omitempty"`
 }
 
-func Collect(ctx context.Context, clientset kubernetes.Interface, mode string) (*Data, error) {
+func Collect(ctx context.Context, clientset kubernetes.Interface, dynClient dynamic.Interface, mode string) (*Data, error) {
 	data := &Data{
 		ExtraTagInfo:   make(map[string]string),
 		ExtraFieldInfo: make(map[string]interface{}),
@@ -214,6 +226,14 @@ func Collect(ctx context.Context, clientset kubernetes.Interface, mode string) (
 		}
 	}
 	logrus.WithFields(logrus.Fields{"managed": rancherManaged, "version": rancherVersion, "installUUID": rancherInstallUUID}).Debug("detected Rancher")
+
+	logrus.Debug("detecting Prime distribution flag")
+	prime, sysDefaultRegistry := detectPrime(ctx, dynClient)
+	data.ExtraFieldInfo["rancher-prime"] = prime
+	if sysDefaultRegistry != "" {
+		data.ExtraFieldInfo["system-default-registry"] = sysDefaultRegistry
+	}
+	logrus.WithFields(logrus.Fields{"prime": prime, "systemDefaultRegistry": sysDefaultRegistry}).Debug("detected Prime")
 
 	logrus.Debug("detecting IP stack configuration")
 	ipStack := detectIPStack(ctx, clientset)
@@ -502,4 +522,49 @@ func detectIPStack(ctx context.Context, clientset kubernetes.Interface) string {
 	default:
 		return "unknown"
 	}
+}
+
+// detectPrime reads global.prime.enabled and global.systemDefaultRegistry from
+// HelmChart spec.set, which RKE2 injects at bootstrap (rancher/rke2#9859).
+// Returns "unknown" when the CRD/RBAC/charts are absent or no chart carries the
+// key (pre-PR-9859 cluster). Positive wins on HA mismatch.
+func detectPrime(ctx context.Context, dynClient dynamic.Interface) (string, string) {
+	if dynClient == nil {
+		return "unknown", ""
+	}
+	list, err := dynClient.Resource(helmChartGVR).Namespace("kube-system").List(ctx, metav1.ListOptions{})
+	if err != nil {
+		if apierrors.IsNotFound(err) || meta.IsNoMatchError(err) || apierrors.IsForbidden(err) {
+			logrus.WithError(err).Debug("HelmChart CRD or RBAC unavailable; prime=unknown")
+			return "unknown", ""
+		}
+		logrus.WithError(err).Warn("failed to list HelmCharts for Prime detection")
+		return "unknown", ""
+	}
+	state := "unknown"
+	var registry string
+	for i := range list.Items {
+		set, _, _ := unstructured.NestedMap(list.Items[i].Object, "spec", "set")
+		if state != "true" {
+			if s, ok := set["global.prime.enabled"].(string); ok {
+				if b, err := strconv.ParseBool(s); err == nil {
+					switch {
+					case b:
+						state = "true"
+					case state == "unknown":
+						state = "false"
+					}
+				}
+			}
+		}
+		if registry == "" {
+			if r, ok := set["global.systemDefaultRegistry"].(string); ok {
+				registry = r
+			}
+		}
+		if state == "true" && registry != "" {
+			break
+		}
+	}
+	return state, registry
 }

@@ -21,3 +21,7 @@ rules:
   - apiGroups: [""]
     resources: ["services"]
     verbs: ["get"]
+  # Need to read HelmCharts to detect RKE2 prime flag and system-default-registry
+  - apiGroups: ["helm.cattle.io"]
+    resources: ["helmcharts"]
+    verbs: ["get", "list"]

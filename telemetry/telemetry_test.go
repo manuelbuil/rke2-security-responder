@@ -12,7 +12,12 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/dynamic"
+	dynamicfake "k8s.io/client-go/dynamic/fake"
 	"k8s.io/client-go/kubernetes/fake"
 )
 
@@ -223,7 +228,7 @@ func TestCollect_BasicCluster(t *testing.T) {
 		},
 	)
 
-	data, err := Collect(context.Background(), clientset, "recommended")
+	data, err := Collect(context.Background(), clientset, nil, "recommended")
 	if err != nil {
 		t.Fatalf("Collect() error = %v", err)
 	}
@@ -281,7 +286,7 @@ func TestCollect_NodeInfoInconsistent(t *testing.T) {
 		},
 	)
 
-	data, err := Collect(context.Background(), clientset, "recommended")
+	data, err := Collect(context.Background(), clientset, nil, "recommended")
 	if err != nil {
 		t.Fatalf("Collect() error = %v", err)
 	}
@@ -325,7 +330,7 @@ func TestCollect_CNIDetection(t *testing.T) {
 				},
 			)
 
-			data, err := Collect(context.Background(), clientset, "recommended")
+			data, err := Collect(context.Background(), clientset, nil, "recommended")
 			if err != nil {
 				t.Fatalf("Collect() error = %v", err)
 			}
@@ -368,7 +373,7 @@ func TestCollect_IngressDetection(t *testing.T) {
 				},
 			)
 
-			data, err := Collect(context.Background(), clientset, "recommended")
+			data, err := Collect(context.Background(), clientset, nil, "recommended")
 			if err != nil {
 				t.Fatalf("Collect() error = %v", err)
 			}
@@ -400,7 +405,7 @@ func TestCollect_GPUDetection(t *testing.T) {
 		},
 	)
 
-	data, err := Collect(context.Background(), clientset, "recommended")
+	data, err := Collect(context.Background(), clientset, nil, "recommended")
 	if err != nil {
 		t.Fatalf("Collect() error = %v", err)
 	}
@@ -438,7 +443,7 @@ func TestCollect_RancherManaged(t *testing.T) {
 		},
 	)
 
-	data, err := Collect(context.Background(), clientset, "recommended")
+	data, err := Collect(context.Background(), clientset, nil, "recommended")
 	if err != nil {
 		t.Fatalf("Collect() error = %v", err)
 	}
@@ -457,7 +462,7 @@ func TestCollect_RancherManaged(t *testing.T) {
 func TestCollect_MissingKubeSystem(t *testing.T) {
 	clientset := fake.NewClientset()
 
-	_, err := Collect(context.Background(), clientset, "recommended")
+	_, err := Collect(context.Background(), clientset, nil, "recommended")
 	if err == nil {
 		t.Error("Collect() expected error for missing kube-system namespace")
 	}
@@ -628,7 +633,7 @@ func TestCollect_GPUOperatorDetection(t *testing.T) {
 		},
 	)
 
-	data, err := Collect(context.Background(), clientset, "recommended")
+	data, err := Collect(context.Background(), clientset, nil, "recommended")
 	if err != nil {
 		t.Fatalf("Collect() error = %v", err)
 	}
@@ -657,7 +662,7 @@ func TestCollect_IngressAsDaemonSet(t *testing.T) {
 		},
 	)
 
-	data, err := Collect(context.Background(), clientset, "recommended")
+	data, err := Collect(context.Background(), clientset, nil, "recommended")
 	if err != nil {
 		t.Fatalf("Collect() error = %v", err)
 	}
@@ -696,7 +701,7 @@ func TestCollect_IPStackFromService(t *testing.T) {
 				},
 			)
 
-			data, err := Collect(context.Background(), clientset, "recommended")
+			data, err := Collect(context.Background(), clientset, nil, "recommended")
 			if err != nil {
 				t.Fatalf("Collect() error = %v", err)
 			}
@@ -717,7 +722,7 @@ func TestCollect_IPStackNoService(t *testing.T) {
 		},
 	)
 
-	data, err := Collect(context.Background(), clientset, "recommended")
+	data, err := Collect(context.Background(), clientset, nil, "recommended")
 	if err != nil {
 		t.Fatalf("Collect() error = %v", err)
 	}
@@ -771,7 +776,7 @@ func TestCollect_MinimalMode(t *testing.T) {
 		},
 	)
 
-	data, err := Collect(context.Background(), clientset, "minimal")
+	data, err := Collect(context.Background(), clientset, nil, "minimal")
 	if err != nil {
 		t.Fatalf("Collect() error = %v", err)
 	}
@@ -862,7 +867,7 @@ func TestCollect_RecommendedModeIncludesRancherDetails(t *testing.T) {
 		},
 	)
 
-	data, err := Collect(context.Background(), clientset, "recommended")
+	data, err := Collect(context.Background(), clientset, nil, "recommended")
 	if err != nil {
 		t.Fatalf("Collect() error = %v", err)
 	}
@@ -889,5 +894,181 @@ func TestCollect_RecommendedModeIncludesRancherDetails(t *testing.T) {
 	}
 	if data.ExtraFieldInfo["rancher-install-uuid"] != "test-uuid" {
 		t.Errorf("rancher-install-uuid = %v, want test-uuid", data.ExtraFieldInfo["rancher-install-uuid"])
+	}
+}
+
+var (
+	primeGVRToListKind = map[schema.GroupVersionResource]string{helmChartGVR: "HelmChartList"}
+	primeScheme        = runtime.NewScheme()
+)
+
+func newHelmChart(name, primeEnabled, registry string) *unstructured.Unstructured {
+	set := map[string]interface{}{}
+	if primeEnabled != "" {
+		set["global.prime.enabled"] = primeEnabled
+	}
+	if registry != "" {
+		set["global.systemDefaultRegistry"] = registry
+	}
+	spec := map[string]interface{}{"chart": name}
+	if len(set) > 0 {
+		spec["set"] = set
+	}
+	return &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "helm.cattle.io/v1",
+			"kind":       "HelmChart",
+			"metadata": map[string]interface{}{
+				"name":      name,
+				"namespace": "kube-system",
+			},
+			"spec": spec,
+		},
+	}
+}
+
+func newDynClient(objs ...runtime.Object) dynamic.Interface {
+	return dynamicfake.NewSimpleDynamicClientWithCustomListKinds(primeScheme, primeGVRToListKind, objs...)
+}
+
+func TestDetectPrime(t *testing.T) {
+	tests := []struct {
+		name         string
+		client       dynamic.Interface
+		wantPrime    string
+		wantRegistry string
+	}{
+		{
+			name:         "nil client",
+			client:       nil,
+			wantPrime:    "unknown",
+			wantRegistry: "",
+		},
+		{
+			name:         "no helmcharts",
+			client:       newDynClient(),
+			wantPrime:    "unknown",
+			wantRegistry: "",
+		},
+		{
+			name: "prime enabled",
+			client: newDynClient(
+				newHelmChart("rke2-coredns", "true", "registry.rancher.com"),
+				newHelmChart("rke2-canal", "true", "registry.rancher.com"),
+			),
+			wantPrime:    "true",
+			wantRegistry: "registry.rancher.com",
+		},
+		{
+			name: "prime disabled",
+			client: newDynClient(
+				newHelmChart("rke2-coredns", "false", ""),
+			),
+			wantPrime:    "false",
+			wantRegistry: "",
+		},
+		{
+			name: "key absent on all charts",
+			client: newDynClient(
+				newHelmChart("rke2-coredns", "", ""),
+				newHelmChart("rke2-canal", "", ""),
+			),
+			wantPrime:    "unknown",
+			wantRegistry: "",
+		},
+		{
+			name: "HA mismatch positive wins",
+			client: newDynClient(
+				newHelmChart("rke2-coredns", "true", "registry.rancher.com"),
+				newHelmChart("rke2-canal", "false", ""),
+			),
+			wantPrime:    "true",
+			wantRegistry: "registry.rancher.com",
+		},
+		{
+			name: "malformed bool value ignored",
+			client: newDynClient(
+				newHelmChart("rke2-coredns", "not-a-bool", "my.mirror.example.com"),
+			),
+			wantPrime:    "unknown",
+			wantRegistry: "my.mirror.example.com",
+		},
+		{
+			name: "registry only no prime key",
+			client: newDynClient(
+				newHelmChart("rke2-coredns", "", "my.mirror.example.com"),
+			),
+			wantPrime:    "unknown",
+			wantRegistry: "my.mirror.example.com",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotPrime, gotRegistry := detectPrime(context.Background(), tt.client)
+			if gotPrime != tt.wantPrime {
+				t.Errorf("detectPrime() prime = %q, want %q", gotPrime, tt.wantPrime)
+			}
+			if gotRegistry != tt.wantRegistry {
+				t.Errorf("detectPrime() registry = %q, want %q", gotRegistry, tt.wantRegistry)
+			}
+		})
+	}
+}
+
+func runPrimeCollect(t *testing.T, mode string, charts ...*unstructured.Unstructured) *Data {
+	t.Helper()
+	objs := make([]runtime.Object, len(charts))
+	for i, c := range charts {
+		objs[i] = c
+	}
+	clientset := fake.NewClientset(
+		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "kube-system", UID: types.UID("test-uuid")}},
+		&corev1.Service{
+			ObjectMeta: metav1.ObjectMeta{Name: "kubernetes", Namespace: "default"},
+			Spec:       corev1.ServiceSpec{IPFamilies: []corev1.IPFamily{corev1.IPv4Protocol}},
+		},
+	)
+	data, err := Collect(context.Background(), clientset, newDynClient(objs...), mode)
+	if err != nil {
+		t.Fatalf("Collect() error = %v", err)
+	}
+	return data
+}
+
+func TestCollect_PrimeDetected(t *testing.T) {
+	data := runPrimeCollect(t, "recommended", newHelmChart("rke2-coredns", "true", "registry.rancher.com"))
+	if data.ExtraFieldInfo["rancher-prime"] != "true" {
+		t.Errorf("rancher-prime = %v, want %q", data.ExtraFieldInfo["rancher-prime"], "true")
+	}
+	if data.ExtraFieldInfo["system-default-registry"] != "registry.rancher.com" {
+		t.Errorf("system-default-registry = %v, want %q", data.ExtraFieldInfo["system-default-registry"], "registry.rancher.com")
+	}
+}
+
+func TestCollect_PrimeNotDetected(t *testing.T) {
+	data := runPrimeCollect(t, "recommended", newHelmChart("rke2-coredns", "false", ""))
+	if data.ExtraFieldInfo["rancher-prime"] != "false" {
+		t.Errorf("rancher-prime = %v, want %q", data.ExtraFieldInfo["rancher-prime"], "false")
+	}
+	if _, ok := data.ExtraFieldInfo["system-default-registry"]; ok {
+		t.Errorf("system-default-registry should be omitted when empty, got %v", data.ExtraFieldInfo["system-default-registry"])
+	}
+}
+
+func TestCollect_PrimeUnknown(t *testing.T) {
+	data := runPrimeCollect(t, "recommended")
+	if data.ExtraFieldInfo["rancher-prime"] != "unknown" {
+		t.Errorf("rancher-prime = %v, want %q", data.ExtraFieldInfo["rancher-prime"], "unknown")
+	}
+}
+
+func TestCollect_PrimeMinimalMode(t *testing.T) {
+	data := runPrimeCollect(t, "minimal", newHelmChart("rke2-coredns", "true", "registry.rancher.com"))
+	if data.ExtraFieldInfo["rancher-prime"] != "true" {
+		t.Errorf("rancher-prime (minimal) = %v, want %q", data.ExtraFieldInfo["rancher-prime"], "true")
+	}
+	if data.ExtraFieldInfo["system-default-registry"] != "registry.rancher.com" {
+		t.Errorf("system-default-registry (minimal) = %v, want %q", data.ExtraFieldInfo["system-default-registry"], "registry.rancher.com")
 	}
 }

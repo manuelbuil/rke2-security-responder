@@ -11,6 +11,7 @@ import (
 
 	"github.com/rancher/rke2-security-responder/telemetry"
 	"github.com/sirupsen/logrus"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 )
@@ -47,6 +48,11 @@ func run() error {
 		return fmt.Errorf("kubernetes client: %w", err)
 	}
 
+	dynClient, err := dynamic.NewForConfig(config)
+	if err != nil {
+		return fmt.Errorf("dynamic client: %w", err)
+	}
+
 	ctx := context.Background()
 
 	mode := os.Getenv("SECURITY_RESPONDER_MODE")
@@ -54,7 +60,7 @@ func run() error {
 		mode = "recommended"
 	}
 
-	data, err := telemetry.Collect(ctx, clientset, mode)
+	data, err := telemetry.Collect(ctx, clientset, dynClient, mode)
 	if err != nil {
 		return fmt.Errorf("collect data: %w", err)
 	}

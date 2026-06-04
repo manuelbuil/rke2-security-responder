@@ -35,6 +35,7 @@ Based on [ADR 010-security-responder](https://github.com/rancher/rke2/blob/maste
   - SELinux status
   - GPU node count, vendor, and operator (if present)
   - Rancher Manager status, version, and install UUID (if managed)
+  - Rancher Prime distribution flag and observed `system-default-registry` (read from HelmChart `spec.set`)
   - IP stack configuration (IPv4-only, IPv6-only, or dual-stack)
 - Sends data to a configurable endpoint
 - Fails gracefully in disconnected environments
@@ -60,6 +61,7 @@ the `minimal` setting instead.
 - CNI plugin, ingress controller, IP stack configuration
 - GPU presence and vendor
 - Whether Rancher manages the cluster (boolean only)
+- Rancher Prime distribution flag (tri-state) and observed `system-default-registry`
 
 **Minimal mode** redacts:
 - `serverNodeCount`, `agentNodeCount`, `gpuNodeCount` → `-1`
@@ -102,6 +104,8 @@ Example recommended payload structure:
     "rancher-managed": true,
     "rancher-version": "v2.9.3",
     "rancher-install-uuid": "53741f60-f208-48fc-ae81-8a969510a598",
+    "rancher-prime": "true",
+    "system-default-registry": "registry.rancher.com",
     "ip-stack": "dual-stack"
   }
 }
