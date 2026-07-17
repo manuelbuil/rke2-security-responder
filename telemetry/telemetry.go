@@ -297,12 +297,13 @@ func Send(ctx context.Context, data *Data, endpoint string) (*Response, error) {
 		}
 
 		newer := filterNewerVersions(response.Versions, data.AppVersion)
+		current := filterCurrentVersion(response.Versions, data.AppVersion)
 		logrus.WithFields(logrus.Fields{
 			"versions":        len(response.Versions),
 			"newer":           len(newer),
 			"intervalMinutes": response.RequestIntervalInMinutes,
 		}).Info("response received")
-		logRecommendations(newer)
+		logRecommendations(newer, current)
 
 		logrus.WithField("attempt", attempt).Info("data sent")
 		return &response, nil
@@ -385,24 +386,34 @@ func filterNewerVersions(versions []Version, current string) []Version {
 	return out
 }
 
-func logRecommendations(newer []Version) {
+func filterCurrentVersion(versions []Version, current string) *Version {
+	for i := range versions {
+		if versions[i].Name == current {
+			return &versions[i]
+		}
+	}
+	return nil
+}
+
+func logRecommendations(newer []Version, current *Version) {
 	for _, v := range newer {
 		fields := logrus.Fields{"version": v.Name, "releaseDate": v.ReleaseDate}
 		if url := v.ExtraInfo["releaseNotesURL"]; url != "" {
 			fields["releaseNotesURL"] = url
 		}
 		logrus.WithFields(fields).Info("available version")
-
-		cves := parseCVEs(v.ExtraInfo["cves"])
-		if len(cves) > 0 {
-			logrus.WithFields(logrus.Fields{
-				"version":         v.Name,
-				"cveCount":        len(cves),
-				"cves":            strings.Join(cves, ", "),
-				"releaseNotesURL": v.ExtraInfo["releaseNotesURL"],
-			}).Warn("newer version fixes security vulnerabilities")
-		}
 	}
+
+	if current == nil {
+		return
+	}
+
+	cves := parseCVEs(current.ExtraInfo["cves"])
+	if len(cves) == 0 {
+		return
+	}
+
+	logrus.Warnf("The RKE2 version %s includes CVEs. These are the %d most relevant: %s. Please upgrade to a newer version to fix security vulnerabilities", current.Name, len(cves), strings.Join(cves, ", "))
 }
 
 func extractImageVersion(image string) string {
