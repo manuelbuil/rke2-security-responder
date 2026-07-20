@@ -1197,6 +1197,7 @@ func TestSend_MixedVersions_OnlyNewerLogged(t *testing.T) {
 	server := newSendStub(t, Response{
 		Versions: []Version{
 			{Name: "v1.36.0+rke2r1", ReleaseDate: "2025-01-01"},
+			{Name: "v1.36.1+rke2r1", ReleaseDate: "2025-01-15", ExtraInfo: map[string]string{"cves": "CVE-2026-9"}},
 			{Name: "v1.36.1+rke2r2", ReleaseDate: "2025-02-01", ExtraInfo: map[string]string{"cves": "CVE-2026-9"}},
 			{Name: "v1.37.0+rke2r1", ReleaseDate: "2025-03-01"},
 			{Name: "v1.35.0+rke2r1", ReleaseDate: "2024-10-01"},
@@ -1226,16 +1227,16 @@ func TestSend_MixedVersions_OnlyNewerLogged(t *testing.T) {
 	}
 
 	rr := entriesWithMsg(hook, "response received")
-	if len(rr) == 0 || rr[0].Data["newer"] != 2 || rr[0].Data["versions"] != 4 {
-		t.Errorf("response received = %+v, want versions=4 newer=2", rr)
+	if len(rr) == 0 || rr[0].Data["newer"] != 2 || rr[0].Data["versions"] != 5 {
+		t.Errorf("response received = %+v, want versions=5 newer=2", rr)
 	}
 
-	warn := entriesWithMsg(hook, "newer version fixes security vulnerabilities")
-	if len(warn) == 0 {
-		t.Fatal("CVE warn expected for newer rke2r2 rebuild")
+	warn := entriesWithMsg(hook, "The RKE2 version v1.36.1+rke2r1 includes CVEs. These are the 1 most relevant: CVE-2026-9. Please upgrade to a newer version to fix security vulnerabilities")
+	if len(warn) != 1 {
+		t.Fatalf("current-version CVE warn count = %d, want 1", len(warn))
 	}
-	if warn[0].Data["version"] != "v1.36.1+rke2r2" {
-		t.Errorf("CVE warn version = %v, want v1.36.1+rke2r2", warn[0].Data["version"])
+	if len(warn[0].Data) != 0 {
+		t.Errorf("warning fields = %+v, want none", warn[0].Data)
 	}
 }
 
@@ -1260,5 +1261,70 @@ func TestSend_UnparseableAppVersion_ShowsAll(t *testing.T) {
 	rr := entriesWithMsg(hook, "response received")
 	if len(rr) == 0 || rr[0].Data["newer"] != 2 {
 		t.Errorf("response received newer = %+v, want 2", rr)
+	}
+}
+
+func TestFilterCurrentVersion(t *testing.T) {
+	tests := []struct {
+		name           string
+		currentVersion string
+		versions       []Version
+		wantName       string
+		wantCVEs       []string
+		wantNil        bool
+	}{
+		{
+			name:           "returns exact current version",
+			currentVersion: "v1.35.5+rke2r1",
+			versions: []Version{
+				{Name: "v1.35.5+rke2r1", ExtraInfo: map[string]string{"cves": "CVE-CURRENT-1,CVE-CURRENT-2"}},
+				{Name: "v1.35.6+rke2r1", ExtraInfo: map[string]string{"cves": "CVE-A"}},
+				{Name: "v1.35.5+rke2r2", ExtraInfo: map[string]string{"cves": "CVE-B,CVE-A"}},
+				{Name: "v1.36.2+rke2r1", ExtraInfo: map[string]string{"cves": "CVE-C"}},
+			},
+			wantName: "v1.35.5+rke2r1",
+			wantCVEs: []string{"CVE-CURRENT-1", "CVE-CURRENT-2"},
+		},
+		{
+			name:           "returns current version even when cves are empty",
+			currentVersion: "v1.35.5+rke2r1",
+			versions: []Version{
+				{Name: "v1.35.5+rke2r1"},
+				{Name: "v1.35.5+rke2r2"},
+				{Name: "v1.35.6+rke2r1", ExtraInfo: map[string]string{"cves": "CVE-A"}},
+			},
+			wantName: "v1.35.5+rke2r1",
+			wantCVEs: nil,
+		},
+		{
+			name:           "returns nil when current version missing",
+			currentVersion: "v1.35.5+rke2r1",
+			versions: []Version{
+				{Name: "v1.35.5+rke2r2"},
+				{Name: "v1.35.6+rke2r1"},
+			},
+			wantNil: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := filterCurrentVersion(tt.versions, tt.currentVersion)
+			if tt.wantNil {
+				if got != nil {
+					t.Fatalf("filterCurrentVersion() = %+v, want nil", *got)
+				}
+				return
+			}
+			if got == nil {
+				t.Fatal("filterCurrentVersion() = nil, want current version")
+			}
+			if got.Name != tt.wantName {
+				t.Fatalf("filterCurrentVersion().Name = %q, want %q", got.Name, tt.wantName)
+			}
+			if cves := parseCVEs(got.ExtraInfo["cves"]); !slices.Equal(cves, tt.wantCVEs) {
+				t.Fatalf("parseCVEs(current.ExtraInfo[cves]) = %v, want %v", cves, tt.wantCVEs)
+			}
+		})
 	}
 }
